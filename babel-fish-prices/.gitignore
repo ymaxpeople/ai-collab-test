@@ -1,0 +1,19 @@
+# secrets — never commit these
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*seed*
+*mnemonic*
+
+# python
+__pycache__/
+*.pyc
+
+# local snapshot database
+*.db
+
+# editor / os
+.DS_Store
+.vscode/
