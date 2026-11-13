@@ -1,0 +1,18 @@
+# secrets — 絶対に commit しない
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*seed*
+*mnemonic*
+
+# dependencies / build
+node_modules/
+dist/
+__pycache__/
+*.pyc
+
+# editor / os
+.DS_Store
+.vscode/
