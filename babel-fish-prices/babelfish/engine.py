@@ -34,9 +34,13 @@ def grade_pool(liquidity_usd, hops, volume_24h_usd=None, last_trade_age_s=None):
     """Confidence grade for one token price from its first-hop pool."""
     if liquidity_usd is None or liquidity_usd < config.CONF_C_MIN_LIQUIDITY:
         return "unpriced"
-    if liquidity_usd >= config.CONF_A_MIN_LIQUIDITY and hops <= 2:
+    # Grade by liquidity only; the 3-hop penalty is applied exactly once,
+    # below. (An earlier version also required hops <= 2 for A/B, which
+    # downgraded 3-hop tokens twice and made them always "unpriced" —
+    # review finding, 2026-11-14.)
+    if liquidity_usd >= config.CONF_A_MIN_LIQUIDITY:
         grade = "A"
-    elif liquidity_usd >= config.CONF_B_MIN_LIQUIDITY and hops <= 2:
+    elif liquidity_usd >= config.CONF_B_MIN_LIQUIDITY:
         grade = "B"
     else:
         grade = "C"
@@ -126,16 +130,27 @@ class PriceEngine:
                 symbol="42", address=config.TOKENS["42"][0], price=a_price,
                 liquidity_usd=None, confidence=anchor_conf,
                 route=["42", "USDT"], note="anchor price supplied by fixture")
-        elif anchor_pair is not None:
+        elif anchor_pair is not None and self._usable(anchor_pair):
             p42 = anchor_pair.price_of_in("42", "USDT")  # USDT per 42; USDT=$1
             prices["42"] = p42
             liq = self._pool_liquidity_usd(anchor_pair, prices)
             anchor_conf = grade_pool(liq, hops=1)
-            results["42"] = PriceResult(
-                symbol="42", address=config.TOKENS["42"][0], price=p42,
-                liquidity_usd=liq, confidence=anchor_conf,
-                route=["42", "USDT"],
-                staleness_seconds=self._route_staleness([anchor_pair]))
+            if anchor_conf == "unpriced":
+                # Same rule as derived tokens: unpriced means no number.
+                prices.pop("42", None)
+                results["42"] = PriceResult(
+                    symbol="42", address=config.TOKENS["42"][0], price=None,
+                    liquidity_usd=liq, confidence="unpriced",
+                    route=["42", "USDT"],
+                    staleness_seconds=self._route_staleness([anchor_pair]),
+                    note="anchor pool below the unpriced threshold; "
+                         "price withheld")
+            else:
+                results["42"] = PriceResult(
+                    symbol="42", address=config.TOKENS["42"][0], price=p42,
+                    liquidity_usd=liq, confidence=anchor_conf,
+                    route=["42", "USDT"],
+                    staleness_seconds=self._route_staleness([anchor_pair]))
         else:
             results["42"] = PriceResult(
                 symbol="42", address=config.TOKENS["42"][0],
@@ -163,14 +178,20 @@ class PriceEngine:
             return None
         return max(0.0, self.now - max(stamps))
 
+    @staticmethod
+    def _usable(state) -> bool:
+        """A pair with a zero reserve on either side cannot price anything
+        (division by zero / a literal 0.0 price) — treat it as absent."""
+        return state is not None and state.reserve0_raw > 0 and state.reserve1_raw > 0
+
     def _price_token(self, symbol, prices: dict, anchor_conf: str) -> PriceResult:
         address = config.TOKENS[symbol][0]
         candidates = []
-        if self._pair(symbol, "USDT") is not None:
+        if self._usable(self._pair(symbol, "USDT")):
             candidates.append((["USDT"], 1))
-        if self._pair(symbol, "42") is not None and "42" in prices:
+        if self._usable(self._pair(symbol, "42")) and "42" in prices:
             candidates.append((["42", "USDT"], 2))
-        if self._pair(symbol, "FISH") is not None and "FISH" in prices:
+        if self._usable(self._pair(symbol, "FISH")) and "FISH" in prices:
             candidates.append((["FISH", "42", "USDT"], 3))
         if not candidates:
             return PriceResult(symbol=symbol, address=address,
@@ -196,6 +217,17 @@ class PriceEngine:
         first_pool_liq = self._pool_liquidity_usd(states[0], prices)
         grade = grade_pool(first_pool_liq, hops)
         grade = _min_grade(grade, anchor_conf)  # anchor cap
+        if grade == "unpriced":
+            # "unpriced" must mean no number at all (README contract): a
+            # numeric price next to an unpriced label invites misuse, and
+            # downstream tokens must not route through an unpriced token.
+            prices.pop(symbol, None)
+            return PriceResult(
+                symbol=symbol, address=address, price=None,
+                liquidity_usd=first_pool_liq,
+                staleness_seconds=self._route_staleness(states),
+                confidence="unpriced", route=route,
+                note="pool below the unpriced threshold; price withheld")
         return PriceResult(
             symbol=symbol, address=address, price=price,
             liquidity_usd=first_pool_liq,

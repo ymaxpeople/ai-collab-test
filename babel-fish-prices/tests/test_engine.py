@@ -15,7 +15,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from babelfish import config
-from babelfish.datasource import FixtureDataSource, pair_key
+from babelfish.datasource import FixtureDataSource, PairState, pair_key
 from babelfish.engine import PriceEngine, grade_pool
 from babelfish.service import PriceService
 from babelfish.store import SnapshotStore
@@ -95,6 +95,97 @@ def test_twap_store():
         assert t2["twap"] is None and t2["note"], t2
     finally:
         os.unlink(path)
+
+
+def _state(sym0, amount0, sym1, amount1):
+    """Synthetic 18-decimal PairState for engine tests."""
+    return PairState(
+        pair_address="0x0000000000000000000000000000000000000001",
+        token0_symbol=sym0, token1_symbol=sym1,
+        reserve0_raw=int(amount0 * 10 ** 18),
+        reserve1_raw=int(amount1 * 10 ** 18),
+        decimals0=18, decimals1=18, block_timestamp=None, fetched_at=0.0)
+
+
+def _anchor_and_fish_pairs():
+    # 42 = $1.00 (pool $200K -> anchor grade A); FISH = 2.00 (pool $200K -> A)
+    return {
+        pair_key("42", "USDT"): _state("USDT", 100_000, "42", 100_000),
+        pair_key("FISH", "42"): _state("FISH", 50_000, "42", 100_000),
+    }
+
+
+def test_usdt_decimals_not_six():
+    # On InfiniteDrive the bridged USDT's decimals() is 18, not 6
+    # (verified on-chain 2026-11-14). Config must not hard-code 6 again:
+    # None means "read on-chain", 18 is the verified value.
+    assert config.TOKENS["USDT"][1] in (None, 18)
+
+
+def test_three_hop_grades():
+    # The 3-hop penalty applies exactly once (regression: it used to apply
+    # twice, making every 3-hop token unpriced).
+    assert grade_pool(100_000, hops=3) == "B"   # A downgraded once
+    assert grade_pool(20_000, hops=3) == "C"    # B downgraded once
+    assert grade_pool(60_000, hops=2) == "A"    # no penalty at 2 hops
+    pairs = _anchor_and_fish_pairs()
+    # MARVIN via FISH: first pool ~$120K -> raw A -> 3-hop downgrade -> B.
+    pairs[pair_key("MARVIN", "FISH")] = _state("MARVIN", 1_000_000_000,
+                                               "FISH", 30_000)
+    results = PriceEngine(pairs).compute_all()
+    marvin = results["MARVIN"]
+    assert marvin.route == ["MARVIN", "FISH", "42", "USDT"], marvin.route
+    assert marvin.price is not None
+    assert abs(marvin.price - 0.00006) / 0.00006 < 0.01, marvin.price
+    assert marvin.confidence == "B", marvin.confidence
+
+
+def test_unpriced_withholds_numeric_price():
+    pairs = _anchor_and_fish_pairs()
+    # KET-FISH with ~$129 of liquidity: computable, but below the $3K
+    # unpriced threshold, so no numeric price may be reported.
+    pairs[pair_key("KET", "FISH")] = _state("KET", 2.05, "FISH", 32.18)
+    results = PriceEngine(pairs).compute_all()
+    ket = results["KET"]
+    assert ket.confidence == "unpriced", ket.confidence
+    assert ket.price is None, ket.price
+    assert ket.liquidity_usd is not None and ket.liquidity_usd < 3_000
+
+
+def test_zero_reserve_pair_is_skipped():
+    pairs = _anchor_and_fish_pairs()
+    # A drained pool must not crash the engine nor yield a 0.0 price, and
+    # must not take the other tokens down with it.
+    pairs[pair_key("ZAP", "FISH")] = _state("ZAP", 0, "FISH", 100)
+    results = PriceEngine(pairs).compute_all()
+    assert results["ZAP"].price is None
+    assert results["FISH"].price == 2.0
+    for symbol, r in results.items():
+        assert r.price != 0, symbol
+
+
+def test_twap_lookup_is_case_insensitive():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        store = SnapshotStore(path)
+        addr = config.TOKENS["FISH"][0]  # checksummed form
+        now = 1_700_000_000.0
+        store.add_snapshots(now - 3000, [("FISH", addr, 1.0)])
+        store.add_snapshots(now - 1500, [("FISH", addr, 2.0)])
+        store.add_snapshots(now, [("FISH", addr, 3.0)])
+        # Lowercase query (as users type it) must find the same history.
+        t = store.twap(addr.lower(), 3600, now=now)
+        assert t["twap"] == 2.0, t
+    finally:
+        os.unlink(path)
+
+
+def test_mode_db_paths_differ():
+    if os.environ.get("BABELFISH_DB"):
+        return  # explicit override intentionally shared
+    assert config.FIXTURE_DB_PATH != config.DB_PATH
+    assert config.FIXTURE_DB_PATH.endswith("babelfish.fixture.db")
 
 
 def test_service_fixture_mode():

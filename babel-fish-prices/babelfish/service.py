@@ -19,7 +19,11 @@ class PriceService:
                  refresh_interval: float | None = None):
         self.fixture_mode = config.FIXTURE_MODE if fixture_mode is None else fixture_mode
         self.source = make_data_source(self.fixture_mode)
-        self.store = SnapshotStore(db_path or config.DB_PATH)
+        # Fixture and live snapshots live in separate DBs by default, so
+        # fixture values can never leak into live TWAP history.
+        self.store = SnapshotStore(
+            db_path or (config.FIXTURE_DB_PATH if self.fixture_mode
+                        else config.DB_PATH))
         self.refresh_interval = (config.REFRESH_INTERVAL_SECONDS
                                  if refresh_interval is None else refresh_interval)
         self._lock = threading.Lock()
@@ -125,7 +129,9 @@ class PriceService:
                 break
         if match is None:
             return None
-        t = self.store.twap(address, WINDOWS[window])
+        # Look up by the token's canonical address, not the raw user input
+        # (whose casing may differ from what was stored).
+        t = self.store.twap(match.address, WINDOWS[window])
         spot = match.price
         divergence = False
         if t["twap"] and spot is not None:

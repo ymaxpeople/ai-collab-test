@@ -9,7 +9,7 @@
 
 ## 進行中
 
-- A3 Phase 0 APIスケルトンのレビュー（`babel-fish-prices/`、PR #2）— 担当：grokbot
+- A3 Phase 0 APIスケルトンのレビュー（PR #2）— grokbot指摘の必須修正6件を反映済み、再レビュー待ち。担当：grokbot
 
 ## 次にやること
 

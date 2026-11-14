@@ -31,11 +31,16 @@ class SnapshotStore:
         self._conn.commit()
 
     def add_snapshots(self, ts: float, rows):
-        """rows: iterable of (symbol, address, price)."""
+        """rows: iterable of (symbol, address, price).
+
+        Addresses are stored lowercased: Ethereum addresses are
+        case-insensitive, and a checksummed snapshot must be findable by a
+        lowercase query (review finding, 2026-11-14).
+        """
         self._conn.executemany(
             "INSERT INTO snapshots (ts, symbol, address, price)"
             " VALUES (?, ?, ?, ?)",
-            [(ts, s, a, p) for (s, a, p) in rows])
+            [(ts, s, a.lower() if a else a, p) for (s, a, p) in rows])
         self._conn.commit()
 
     def twap(self, address: str, window_seconds: int, now: float | None = None):
@@ -43,8 +48,8 @@ class SnapshotStore:
         now = now if now is not None else time.time()
         cur = self._conn.execute(
             "SELECT ts, price FROM snapshots"
-            " WHERE address = ? AND ts >= ? ORDER BY ts",
-            (address, now - window_seconds))
+            " WHERE lower(address) = ? AND ts >= ? ORDER BY ts",
+            (address.lower(), now - window_seconds))
         rows = cur.fetchall()
         if len(rows) < MIN_SNAPSHOTS:
             return {"twap": None, "snapshots": len(rows), "span_seconds": 0.0,
