@@ -16,9 +16,9 @@ from .store import WINDOWS, SnapshotStore
 
 class PriceService:
     def __init__(self, fixture_mode: bool | None = None, db_path: str | None = None,
-                 refresh_interval: float | None = None):
+                 refresh_interval: float | None = None, source=None):
         self.fixture_mode = config.FIXTURE_MODE if fixture_mode is None else fixture_mode
-        self.source = make_data_source(self.fixture_mode)
+        self.source = source if source is not None else make_data_source(self.fixture_mode)
         # Fixture and live snapshots live in separate DBs by default, so
         # fixture values can never leak into live TWAP history.
         self.store = SnapshotStore(
@@ -31,6 +31,7 @@ class PriceService:
         self._pairs = {}          # pair_key -> PairState
         self._cache_ts = 0.0
         self._last_error = None
+        self._pair_errors = []    # per-pair failures of the last fetch
 
     # -- refresh -----------------------------------------------------------
 
@@ -45,11 +46,16 @@ class PriceService:
                 results = engine.compute_all()
             except Exception as exc:  # noqa: BLE001 - keep serving stale cache
                 self._last_error = str(exc)
+                self._pair_errors = list(
+                    getattr(self.source, "last_errors", []) or [])
                 return self._cache is not None
             self._pairs = pairs
             self._cache = results
             self._cache_ts = time.time()
             self._last_error = None
+            # Partial failures stay visible instead of being swallowed.
+            self._pair_errors = list(
+                getattr(self.source, "last_errors", []) or [])
             rows = [(r.symbol, r.address, r.price) for r in results.values()
                     if r.price is not None and r.address]
             if rows:
@@ -63,12 +69,14 @@ class PriceService:
     # -- queries -------------------------------------------------------------
 
     def health(self) -> dict:
+        degraded = self._last_error is not None or bool(self._pair_errors)
         return {
-            "status": "ok",
+            "status": "degraded" if degraded else "ok",
             "chain_id": config.CHAIN_ID,
             "mode": "fixture" if self.fixture_mode else "live",
             "last_refresh_ts": self._cache_ts or None,
             "last_error": self._last_error,
+            "pair_errors": self._pair_errors,
             "tokens_priced": (sum(1 for r in self._cache.values()
                                   if r.price is not None)
                               if self._cache else 0),
@@ -90,7 +98,9 @@ class PriceService:
             return {"chain_id": config.CHAIN_ID,
                     "mode": "fixture" if self.fixture_mode else "live",
                     "reference_only": True, "generated_at": None,
-                    "stale": False, "error": self._last_error, "tokens": []}
+                    "stale": False, "error": self._last_error,
+                    "partial": bool(self._pair_errors),
+                    "pair_errors": self._pair_errors, "tokens": []}
         tokens = []
         for symbol in self._ordered_symbols():
             r = self._cache[symbol]
@@ -101,6 +111,8 @@ class PriceService:
             "reference_only": True,  # prices are indicative, not lending-grade
             "generated_at": self._cache_ts,
             "stale": self._last_error is not None and self._cache is not None,
+            "partial": bool(self._pair_errors),
+            "pair_errors": self._pair_errors,
             "tokens": tokens,
         }
 

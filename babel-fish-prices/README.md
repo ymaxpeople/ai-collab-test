@@ -42,7 +42,9 @@ python3 run_tests.py
 ```
 
 環境変数: `BABELFISH_REFRESH_SECONDS`（再取得間隔、既定60秒）、
-`BABELFISH_DB`（SQLiteの場所）、`BABELFISH_RPC_SLEEP`（eth_call間の待機秒、既定1.0）
+`BABELFISH_DB`（SQLiteの場所。指定すると両モードで同じDBになるので、
+モードごとに別のパスを指定すること）、
+`BABELFISH_RPC_SLEEP`（eth_call間の待機秒、既定1.0）
 
 ## エンドポイント
 
@@ -75,6 +77,11 @@ python3 run_tests.py
   DBのモード混在）は反映済み。Don't Panic の画面表示との照合は未実施。
   Muse の実行環境からは出口プロキシの都合でRPCに届かないため、
   ライブ実行の再確認はRPCに届く環境で行うこと
+- 障害時の挙動：全ペアの取得に失敗した場合はリフレッシュ自体を失敗扱いにし、
+  直前のキャッシュを返し続ける（`stale: true` と `last_error` で明示）。
+  一部のペアだけ失敗した場合は、取れたペアで価格を出しつつ
+  `partial: true` と `pair_errors` で失敗を可視化する（/health でも
+  `status: degraded` になる）
 - TWAPはスナップショット平均方式の足場。設計ドラフト本来の
   V2累積価格（priceCumulativeLast）方式は後続フェーズ
 - 信頼度しきい値のうち 24h出来高と最終取引時刻は、データが取れている

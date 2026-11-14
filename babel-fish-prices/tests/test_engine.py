@@ -15,8 +15,9 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from babelfish import config
-from babelfish.datasource import FixtureDataSource, PairState, pair_key
+from babelfish.datasource import FixtureDataSource, LiveDataSource, PairState, pair_key
 from babelfish.engine import PriceEngine, grade_pool
+from babelfish.rpc import RpcClient
 from babelfish.service import PriceService
 from babelfish.store import SnapshotStore
 
@@ -186,6 +187,69 @@ def test_mode_db_paths_differ():
         return  # explicit override intentionally shared
     assert config.FIXTURE_DB_PATH != config.DB_PATH
     assert config.FIXTURE_DB_PATH.endswith("babelfish.fixture.db")
+
+
+def test_all_pairs_failing_raises_instead_of_empty_success():
+    # N1 regression: when every RPC call fails, fetch_pairs must raise —
+    # returning {} would let the service overwrite a good cache with
+    # all-null prices while reporting success.
+    client = RpcClient(endpoints=["http://127.0.0.1:9"], timeout=2,
+                       sleep_between_calls=0)
+    source = LiveDataSource(client)
+    try:
+        source.fetch_pairs()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("fetch_pairs should raise when all pairs fail")
+    assert source.last_errors, "failures should be recorded"
+
+
+def test_total_rpc_failure_keeps_error_state():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        client = RpcClient(endpoints=["http://127.0.0.1:9"], timeout=2,
+                           sleep_between_calls=0)
+        service = PriceService(fixture_mode=False, db_path=path,
+                               source=LiveDataSource(client),
+                               refresh_interval=3600)
+        assert service.refresh(force=True) is False
+        health = service.health()
+        assert health["last_error"], health
+        assert health["status"] == "degraded", health
+        envelope = service.prices()
+        assert envelope["tokens"] == [] and envelope["error"], envelope
+    finally:
+        os.unlink(path)
+
+
+def test_partial_failure_is_surfaced():
+    class PartialSource:
+        last_errors = ["KET-FISH: boom"]
+
+        def fetch_pairs(self):
+            return FixtureDataSource().fetch_pairs()
+
+        def anchor_override(self):
+            return FixtureDataSource().anchor_override()
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        service = PriceService(fixture_mode=True, db_path=path,
+                               source=PartialSource(), refresh_interval=3600)
+        envelope = service.prices()
+        assert envelope["partial"] is True, envelope
+        assert envelope["pair_errors"] == ["KET-FISH: boom"], envelope
+        health = service.health()
+        assert health["status"] == "degraded", health
+        assert health["pair_errors"] == ["KET-FISH: boom"], health
+        # ...while the pairs that did load still price normally.
+        by_symbol = {t["symbol"]: t for t in envelope["tokens"]}
+        assert by_symbol["FISH"]["price"] is not None
+    finally:
+        os.unlink(path)
 
 
 def test_service_fixture_mode():

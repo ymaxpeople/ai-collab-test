@@ -85,6 +85,19 @@ class LiveDataSource:
                 continue
             if state is not None:
                 out[pair_key(sym_a, sym_b)] = state
+        # Total failure must NOT look like success (review finding N1,
+        # 2026-11-14): if nothing could be fetched, or the 42-USDT anchor
+        # pair failed, raise so the service keeps serving its previous
+        # cache and reports the error instead of overwriting good prices
+        # with an all-null result.
+        if self.last_errors and not out:
+            raise RuntimeError(
+                "all pair fetches failed: " + "; ".join(self.last_errors))
+        if pair_key("42", "USDT") not in out and any(
+                e.startswith("42-USDT") for e in self.last_errors):
+            raise RuntimeError(
+                "anchor pair 42-USDT fetch failed: "
+                + "; ".join(self.last_errors))
         return out
 
     def _fetch_one(self, sym_a, sym_b, addr_to_symbol):
@@ -118,6 +131,9 @@ class LiveDataSource:
 
 class FixtureDataSource:
     """Offline source: only the pairs in fixtures.FIXTURE_PAIRS exist."""
+
+    def __init__(self):
+        self.last_errors: list[str] = []  # interface parity with live source
 
     def fetch_pairs(self) -> dict:
         now = time.time()
